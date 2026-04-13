@@ -1,790 +1,540 @@
 # -*- coding: utf-8 -*-
 import numpy as np
-import pandas as pd
-import os, ntpath, pickle
-from HelpDialog import HelpDialog
 from PyQt5 import QtCore, QtGui, QtWidgets
-from IVMainPlot import CorrVocIsc, CorrEtaFF, CorrRshFF, DistLtoH, DensEta, DistWT, DistRM, IVBoxPlot, IVHistPlot, IVHistDenPlot, ViolinPlot, CategoryScatter
+
+from HelpDialog import HelpDialog
+from IVMainPlot import (
+    CorrVocIsc, CorrEtaFF, CorrRshFF, DistLtoH, DensEta,
+    DistWT, DistRM, IVBoxPlot, IVHistPlot, IVHistDenPlot,
+    ViolinPlot, CategoryScatter
+)
+from FileService import FileService
+from DataService import DataService
+from FilterService import FilterService
+from ReportGenerator import ReportGenerator
+from config import (
+    LabelFormat, DataColumns, PlotParameters, WindowConfig,
+    FilterConfig, PlotType
+)
+from logger_config import setup_logger
+
+logger = setup_logger(__name__)
+
 
 class IVMainGui(QtWidgets.QMainWindow):
     def __init__(self, parent=None):
-        super(IVMainGui, self).__init__(parent)
+        super().__init__(parent)
+        self._setup_window()
+        self._initialize_services()
+        self._initialize_gui_state()
+        self._build_ui()
+
+    def _setup_window(self):
         self.setWindowTitle(self.tr("SCiDA Pro"))
         self.setWindowIcon(QtGui.QIcon(":ScidaPro_icon.png"))
-        #self.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint) # DISABLE BEFORE RELEASE
+        self.resize(WindowConfig.MAIN_WIDTH, WindowConfig.MAIN_HEIGHT)
+        self._center_window()
+        self.setStyleSheet(f'font-size: {WindowConfig.FONT_SIZE}pt;')
 
-        ### Set initial geometry and center the window on the screen ###
-        self.resize(1024, 576)
-        frameGm = self.frameGeometry()
-        centerPoint = QtWidgets.QDesktopWidget().availableGeometry().center()
-        frameGm.moveCenter(centerPoint)
-        self.move(frameGm.topLeft()) 
+    def _center_window(self):
+        frame_geometry = self.frameGeometry()
+        center_point = QtWidgets.QDesktopWidget().availableGeometry().center()
+        frame_geometry.moveCenter(center_point)
+        self.move(frame_geometry.topLeft())
 
-        ### Set default font size ###
-        self.setStyleSheet('font-size: 12pt;')  
+    def _initialize_services(self):
+        self.file_service = FileService()
+        self.data_service = DataService()
+        self.filter_service = FilterService()
+        self.report_generator = ReportGenerator(self.data_service, self.filter_service)
 
-        self.clip = QtWidgets.QApplication.clipboard()
+    def _initialize_gui_state(self):
+        self.clipboard = QtWidgets.QApplication.clipboard()
         self.series_list_model = QtGui.QStandardItemModel()
-        self.series_list_model.itemChanged.connect(self.rename_dataset)
+        self.series_list_model.itemChanged.connect(self._on_rename_dataset)
         self.filter_table_widget = QtWidgets.QTableWidget()
-        self.default_filters = [
-            ["IRev1",">",3],["FF","<",70],["Eta","<",16],
-            ["FF","<",75],["Rsh","<",20],["Eta","<",18]
-            ]
-        self.user_filters = []
-        self.user_filters_plain_format = []
-        self.ad = {} # all data
-        self.adindex = ['Uoc','Isc','RserLfDfIEC','Rsh','FF','Eta','IRev1']
-        
-        self.label_formats = {}
-        self.label_formats[0] = ['Uoc','Isc','RserLfDfIEC','Rsh','FF','Eta','IRev1']
-        self.label_formats[1] = ['Uoc0','Isc0','Rseries_multi_level','Rshunt_SC','Fill0','Eff0','Ireverse_2']
-        self.label_formats[2] = ['Uoc','Isc','RserIEC891','RshuntDfDr','FF','Eta','IRev1']
-        self.label_formats[3] = ['Uoc','Isc','Rs','Rsh','FF','NCell','Irev2']
-        self.label_formats[4] = ['Uoc','Isc','RserLfDfIEC','Rsh','FF','Eta','IRev1']         
-        self.label_format = 0
+        self.label_format = LabelFormat.A
         self.label_text = QtWidgets.QLabel("Data label set A")
         self.first_run = True
-
         self.status_text = QtWidgets.QLabel("")
-
-        self.yl = [] # yield loss
-        self.smr = [] # summaries                     
-        self.smrindex = ['Best cell','Median','Average','Std.dev.']
-        self.smrcolumns = ['Voc [V]','Isc [A]','Rser [mOhm*cm2]','Rshunt [kOhm]','FF [%]','Eta [%]','Irev [A]']      
-        self.ct = [] # correlation table
-        self.reportname = ''
-        self.yloutput = []
+        self.report_name = ''
         self.translator = None
-        self.plot_selection_list = ['Uoc','Isc','Voc*Isc','FF','Eta','RserLfDfIEC','Rsh','IRev1']
-        self.plot_selection_combo_list = []
-        self.plot_selection_combo_list.append('Boxplot')
-        self.plot_selection_combo_list.append('Violinplot')
-        self.plot_selection_combo_list.append('Category scatter')
-        self.plot_selection_combo_list.append('Walk-through')
-        self.plot_selection_combo_list.append('Rolling mean')
-        self.plot_selection_combo_list.append('Low to high')
-        self.plot_selection_combo_list.append('Histogram')
-        self.plot_selection_combo_list.append('Density')
-        self.plot_selection_combo_list.append('Histogram + density')
-        self.plot_selection_combo_list.append('Voc-Isc')
-        self.plot_selection_combo_list.append('Eta-FF')
-        self.plot_selection_combo_list.append('Rsh-FF')
-        self.param_one_combo = QtWidgets.QComboBox(self)
-        self.plot_selection_combo = QtWidgets.QComboBox(self)
-        self.plot_selection_combo.currentIndexChanged.connect(self.plot_selection_changed)        
-        
-        self.prev_dir_path = ""
-        self.wid = None
-        
-        self.create_menu()
-        self.create_main_frame()
-        self.set_default_filters()      
+        self.plot_window = None
+        self.ad = self.data_service.datasets
+
+    def _build_ui(self):
+        self._create_menu()
+        self._create_main_frame()
+        self._set_default_filters()
 
     @QtCore.pyqtSlot(int)
-    def plot_selection_changed(self, index):
-        
+    def _on_plot_selection_changed(self, index: int):
         if index < 3:
             self.param_one_combo.setEnabled(True)
-        elif index > 2 and index < 7:
+        elif 2 < index < 7:
             self.param_one_combo.setCurrentIndex(4)
             self.param_one_combo.setDisabled(True)
         else:
             self.param_one_combo.setDisabled(True)
-            
-    @QtCore.pyqtSlot(QtGui.QStandardItem)
-    def rename_dataset(self,item):
-        entered_name = str(item.text())
-        
-        keepcharacters = (' ','.','_')
-        valid_filename = "".join(c for c in entered_name if c.isalnum() or c in keepcharacters).rstrip()
 
+    @QtCore.pyqtSlot(QtGui.QStandardItem)
+    def _on_rename_dataset(self, item):
+        entered_name = str(item.text())
+        valid_filename = self.file_service.sanitize_filename(entered_name)
 
         if len(valid_filename) > 0:
-            self.ad[self.series_list_model.indexFromItem(item).row()].index.name = valid_filename
+            dataset_index = self.series_list_model.indexFromItem(item).row()
+            self.data_service.rename_dataset(dataset_index, valid_filename)
             item.setText(valid_filename)
         else:
-            item.setText(self.ad[self.series_list_model.indexFromItem(item).row()].index.name)
+            dataset_index = self.series_list_model.indexFromItem(item).row()
+            item.setText(self.data_service.get_dataset_name(dataset_index))
 
-    def load_file(self, filename=None):   
+    def load_file(self):
+        file_dialog = QtWidgets.QFileDialog()
+        filenames, _ = file_dialog.getOpenFileNames(
+            self, self.tr("Load files"),
+            self.file_service.previous_directory,
+            "Excel Files (*.csv *.xls *.xlsx)"
+        )
 
-        #fileNames = QtWidgets.QFileDialog.getOpenFileNames(self,self.tr("Load files"), self.prev_dir_path, "Excel Files (*.csv)")
-        fileNames = QtWidgets.QFileDialog.getOpenFileNames(self,self.tr("Load files"), self.prev_dir_path, "Excel Files (*.csv *.xls *.xlsx)")
-        fileNames = fileNames[0]
-        
-        if (not fileNames):
-            return        
-        
-        empty_data_warning = False
-        non_ascii_warning = False
-        read_error_warning = False
+        if not filenames:
+            return
 
-        num = len(self.ad)
+        has_non_ascii = False
+        has_read_error = False
+        has_empty_data = False
+        initial_count = self.data_service.get_dataset_count()
 
-        for filename in fileNames:
-            # Read all .csv files and insert selected columns into ad
-            # Purge rows with empty or negative elements
-            # Enter new data set names into ad and series list
-
-            # Check for non-ASCII filenames, give warning and skip loading such files
-            try:
-                filename.encode('ascii')
-            except:
-                non_ascii_warning = True
+        for filepath in filenames:
+            if not self.file_service.is_ascii_filename(filepath):
+                has_non_ascii = True
                 continue
-        
-            # Set working directory so that user can remain where they are
-            self.prev_dir_path = ntpath.dirname(filename)
 
-            # Try to load file and give error message if label format is not recognized
-            _, file_extension = ntpath.splitext(filename)
-            if file_extension == ".csv":
-                try:
-                    self.ad[num] = pd.read_csv(filename)[self.label_formats[self.label_format]].dropna()
-                except KeyError:
-                    try:
-                        self.ad[num] = pd.read_csv(filename,sep=';')[self.label_formats[self.label_format]].dropna()
-                    except KeyError:
-                        read_error_warning = True
-            else:
-                try:
-                    xl_file = pd.read_excel(filename)
-                    self.ad[num] = xl_file[self.label_formats[self.label_format]].dropna()
-                except KeyError:
-                    read_error_warning = True
-            
-            # Try to apply default labels to columns; skip current file if unsuccessful
-            try:
-                self.ad[num].columns = self.label_formats[0]
-            except KeyError:
-                continue
-          
-            # Convert to numeric values if needed, reset size of ad            
-            self.ad[num].apply(pd.to_numeric)
-            self.ad[num] = self.ad[num][self.ad[num] > 0]
-           
-            # If data set is empty give warning and remove from ad
-            if self.ad[num].empty:
-                empty_data_warning = True
-                self.ad.pop(num)
-                continue                
+            self.file_service.update_previous_directory(filepath)
+            success = self._load_single_file(filepath)
 
-            # Apply conversion to number sets
-            if self.label_format == 1:
-                self.ad[num].loc[:,'Eta'] *= 100
-                self.ad[num].loc[:,'FF'] *= 100
-            elif self.label_format == 3:
-                self.ad[num].loc[:,'Eta'] *= 100
-            
-            ### add list view item ###
-            str_a = ntpath.splitext(ntpath.basename(filename))[0]
-            self.ad[num].index.name = str_a[0:39] # data set name limited to 40 characters
-            item = QtGui.QStandardItem(str_a[0:39])
-            font = item.font()
-            font.setBold(1)
-            item.setFont(font)
-            self.series_list_model.appendRow(item)                        
-            num += 1
-            
-        if read_error_warning:
-            msg = self.tr("Error while reading data files.\n\nData labels were perhaps not recognized.")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg)
+            if success is False:
+                has_read_error = True
+            elif success is None:
+                has_empty_data = True
 
-        if empty_data_warning:
-            msg = self.tr("Empty data sets were found.\n\nThe application only accepts data entries with a value for Voc, Isc, FF, Eta, Rser, Rsh and Irev. All values also need to be non-negative.")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg)
-            
-        if non_ascii_warning:
-            msg = self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames.")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg)            
-                              
-        if self.ad:
-            self.statusBar().showMessage(self.tr("Ready"),3000)
-        else:
-            self.statusBar().showMessage(self.tr("Please load data files"),3000)
+        self._show_load_warnings(has_non_ascii, has_read_error, has_empty_data)
+        self._update_status_ready()
 
-    def save_files(self):
-        dest_dir = QtWidgets.QFileDialog.getExistingDirectory(None, self.tr('Open directory'), self.prev_dir_path, QtWidgets.QFileDialog.ShowDirsOnly)
-        
-        if not dest_dir:
-            return
-        
-        if len(self.ad) == 0:
-            self.statusBar().showMessage(self.tr("Please load data files"),3000)
-            return
+    def _load_single_file(self, filepath: str) -> bool:
+        current_index = self.data_service.get_dataset_count()
+        columns = DataColumns.LABEL_FORMATS[self.label_format]
 
-        self.prev_dir_path = dest_dir
-            
-        yes_to_all = False
-        
-        for i in self.ad:
-            # Export all filtered IV data to existing csv files
-            filename = self.ad[i].index.name + '.csv'
-            check_overwrite = False
-            save_path = ""
-            
-            # check if file exists and then ask if overwrite is oke
-            if os.name == 'nt': # if windows
-                save_path = dest_dir + '\\' + filename
-                if os.path.isfile(save_path):
-                    check_overwrite = True
-            else: # if not windows
-                save_path = dest_dir + '\/' + filename
-                if os.path.isfile(save_path):
-                    check_overwrite = True
-
-            if check_overwrite and not yes_to_all:
-                reply = QtWidgets.QMessageBox.question(self, self.tr("Message"), "Overwrite \'" + filename + "\'?", QtWidgets.QMessageBox.YesToAll | QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.No)
-
-                if reply == QtWidgets.QMessageBox.No:                    
-                    save_path = QtWidgets.QFileDialog.getSaveFileName(self,self.tr("Save file"), dest_dir, "CSV File (*.csv)")
-                    
-                    if not save_path:
-                        continue
-
-                if reply == QtWidgets.QMessageBox.YesToAll:
-                    yes_to_all = True
-                    
-                if reply == QtWidgets.QMessageBox.Cancel:
-                    return
-                           
-            self.ad[i].to_csv(save_path, index=False)
-        
-        self.statusBar().showMessage(self.tr("Files saved"),3000) 
-                   
-    def combine_datasets(self):
-
-        if len(self.ad) > 1:
-            self.statusBar().showMessage(self.tr("Combining data sets..."),3000)
-        else:
-            self.statusBar().showMessage(self.tr("Please load data files"),3000)
-            return     
-
-        # Clearing associated data sets
-        self.yl = []
-        self.yloutput = []
-        self.smr = [] 
-        self.series_list_model.clear()
-        self.series_list_model.setHorizontalHeaderLabels([self.tr('Data series')])
-
-        num = len(self.ad)
-        if num > 1:
-            i = 1
-            while i < num:
-                self.ad[0] = pd.concat([self.ad[0],self.ad[i]], ignore_index=True)
-                self.ad.pop(i)
-                i += 1
-
-        self.ad[0].index.name = 'Combined data set'
-
-        # Update list view
-        item = QtGui.QStandardItem(self.ad[0].index.name)
-        font = item.font()
-        font.setBold(1)
-        item.setFont(font)
-        self.series_list_model.appendRow(item) 
-                
-        self.statusBar().showMessage(self.tr("Ready"),3000)
-
-    def filter_data(self):
-
-        if self.ad:
-            self.statusBar().showMessage(self.tr("Filtering data..."),3000)
-        else:
-            self.statusBar().showMessage(self.tr("Please load data files"),3000)
-            return            
-
-        self.read_filter_table()
-
-        ylcolumns = []
-        for i in np.arange(0,12):
-            ylcolumns.append('Filter ' + str(i+1))
-        
-        ylindex = ['Filter','Loss count']
-        
-        for j in np.arange(len(self.yl),len(self.ad)):
-            
-            self.yl.append(pd.DataFrame(index=ylindex, columns=ylcolumns))
-            self.yl[j].index.name = len(self.ad[j].index) # count number before filtering and store in index name
-            
-            for i in np.arange(0,12):
-                if self.filter_table_widget.item(i,0).text():
-                    filter_part1 = str(self.filter_table_widget.item(i,0).text())
-                    filter_part2 = str(self.filter_table_widget.item(i,1).text())
-                    filter_part3 = str(self.filter_table_widget.item(i,2).text())
-                    self.yl[j].iloc[0,i] = filter_part1 + filter_part2 + filter_part3 # insert filter information
-                
-                    if filter_part2 == ">":
-                        self.yl[j].iloc[1,i] = (self.ad[j][filter_part1] > float(filter_part3)).sum() # count yield loss cells
-                        self.ad[j] = self.ad[j][self.ad[j][filter_part1] <= float(filter_part3)]
-                    elif filter_part2 == "<":
-                        self.yl[j].iloc[1,i] = (self.ad[j][filter_part1] < float(filter_part3)).sum()
-                        self.ad[j] = self.ad[j][self.ad[j][filter_part1] >= float(filter_part3)]
-
-            name = self.ad[j].index.name
-            self.ad[j] = self.ad[j].reset_index(drop=True) # renumber index due to removed yield loss cells
-            self.ad[j].index.name = name
-
-        null_data = [-1,-1,-1,-1,-1,-1,-1]
-        for i in self.ad:
-            if len(self.ad[i]) == 0: 
-                self.ad[i].loc[0] = null_data
-
-        self.series_list_model.clear()
-        self.series_list_model.setHorizontalHeaderLabels([self.tr('Data series')])
-
-        for i in self.ad:
-            item = QtGui.QStandardItem(self.ad[i].index.name)
-            self.series_list_model.appendRow(item)            
-
-        self.statusBar().showMessage(self.tr("Ready"),3000)                                    
-
-    def make_report(self):
-
-        if self.ad:
-            self.reportname = QtWidgets.QFileDialog.getSaveFileName(self,self.tr("Save file"), self.prev_dir_path, "Excel Files (*.xlsx)")
-            self.reportname = self.reportname[0]
-            
-            if not self.reportname:
-                return
-
-            if self.reportname:
-                self.statusBar().showMessage(self.tr("Making an Excel report..."),3000)
-            else:
-                return
-        else:
-            self.statusBar().showMessage(self.tr("Please load data files"),3000)
-            return
-
-        try:
-            self.reportname.encode('ascii')
-        except:
-            msg = self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames.")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg) 
-            self.reportname = None
-            return
-                        
-        ########## Generate summary tables ##########   
-
-        self.smr = [] # empty any existing table                                        
-                                                   
-        for i in self.ad:
-            self.smr.append(pd.DataFrame(index=self.smrindex, columns=self.smrcolumns))
-            self.smr[i].index.name = 'Data property'
-            self.smr[i]['Data set'] = self.ad[i].index.name + ' (' + repr(len(self.ad[i])) + ' cells)'
-            self.smr[i] = self.smr[i].set_index('Data set', append=True).swaplevel(0,1)
-
-        for i1 in self.ad:
-            for i2, value in enumerate(self.ad[i1].max()):
-                self.smr[i1].iloc[0,i2] = self.ad[i1].iloc[self.ad[i1].idxmax()[5]][i2]
-                self.smr[i1].iloc[1,i2] = self.ad[i1].median()[i2]
-                self.smr[i1].iloc[2,i2] = self.ad[i1].mean()[i2]            
-        
-                paramlist = [0,1,4,5]
-                if i2 in paramlist:
-                    self.smr[i1].iloc[3,i2] = self.ad[i1].std()[i2]
-                else:
-                    self.smr[i1].iloc[3,i2] = np.nan
-
-            self.smr[i1].apply(pd.to_numeric)
-
-            self.smr[i1].iloc[:,2] = self.smr[i1].iloc[:,2]*1000
-            self.smr[i1].iloc[:,3] = self.smr[i1].iloc[:,3]/1000
-
-    
-            roundinglist = [3,2,2,2,1,2,2]            
-            for i3, value in enumerate(roundinglist):
-                self.smr[i1].iloc[:,i3] = np.round(self.smr[i1].iloc[:,i3].astype(np.double),decimals=value)
-
-        ########## Generate yield loss tables for output ##########
-
-        self.yloutput = self.yl[:] # [:] is there so that it makes a copy and not a reference
-        
-        for i, value in enumerate(self.yloutput):
-            # enter total columns with total counts           
-            self.yloutput[i]['Total'] = np.nan
-            self.yloutput[i].iloc[1,12] = self.yloutput[i].iloc[1,:].sum()
-
-        for i, value in enumerate(self.yloutput):             
-            # add percentages row
-            self.yloutput[i].loc['Loss %'] = np.nan 
-            
-            for j in np.arange(0,len(self.yloutput[i].columns)):
-                if not self.yloutput[i].iloc[1,j] == np.nan:
-                    self.yloutput[i].iloc[2,j] = np.round(100 * self.yloutput[i].iloc[1,j] / self.yloutput[i].index.name,decimals=2)
-                    
-            self.yloutput[i] = self.yloutput[i].dropna(1,'all') # drop completely empty filter columns in output
-            
-            # Bugfix; pandas recommends using .loc here
-            self.yloutput[i].index.name = 'Data property'
-            self.yloutput[i]['Data set'] = self.ad[i].index.name + ' (' + repr(self.yloutput[i].index.name) + ' cells)'           
-            self.yloutput[i] = self.yloutput[i].set_index('Data set', append=True).swaplevel(0,1)
-                           
-        ########## Generate correlation tables ##########
-
-        self.ct = [] # empty any existing table
-        
-        for i in self.ad:
-            if not len(self.ad[i]) > 1:
-                continue
-            
-            self.ct.append(np.round(self.ad[i].corr(), decimals=2))
-            self.ct[i].iloc[:,2:4] = np.nan
-            self.ct[i].iloc[2:4,:] = np.nan
-            self.ct[i].iloc[6,:] = np.nan
-            self.ct[i].iloc[:,6] = np.nan
-            self.ct[i] = self.ct[i].dropna(0,'all').T.dropna(0,'all')
-            self.ct[i].index.name = 'Data property'
-            self.ct[i]['Data set'] = self.ad[i].index.name + ' (' + repr(len(self.ad[i])) + ' cells)'
-            self.ct[i] = self.ct[i].set_index('Data set', append=True).swaplevel(0,1) 
-   
-        ########## Export all summary and yield loss data to an Excel file ##########
-
-        writer = pd.ExcelWriter(self.reportname, engine='xlsxwriter')
-        
-        if self.smr: # make sure tables are not empty to avoid any exceptions
-            output1 = pd.concat(self.smr)
-            output1.to_excel(writer,str(self.tr('Summary'))) # str() because xlsxwriter does not accept QString
-            
-        if self.yloutput:
-            output2 = pd.concat(self.yloutput)            
-            output2.to_excel(writer,str(self.tr('Yield loss')))
-               
-        if self.ct:                
-            output3 = pd.concat(self.ct)
-            output3.to_excel(writer,str(self.tr('Correlation')))
-                
-        writer.save()       
-      
-        self.statusBar().showMessage(self.tr("Ready"),3000)
-
-    def open_report(self):
-        
-        if len(self.reportname):
-            self.statusBar().showMessage(self.tr("Opening report..."),3000)
-            if self.reportname[0] != '/': # windows
-                str_a = 'file:///' + self.reportname
-            else: # linux
-                str_a = 'file://' + self.reportname
-            
-            # Strict mode necessary for linux compatibility (spaces > %20)
-            QtGui.QDesktopServices.openUrl(QtCore.QUrl(str_a, QtCore.QUrl.StrictMode)) 
-
-            self.statusBar().showMessage(self.tr("Ready"),3000)
-        else:
-            self.statusBar().showMessage(self.tr("Please make report"),3000)
-                                    
-    def clear_data(self):        
-        self.ad = {}
-        self.yl = []
-        self.yloutput = []
-        self.smr = [] 
-        self.series_list_model.clear()
-        self.series_list_model.setHorizontalHeaderLabels([self.tr('Data series')])
-        self.reportname = ''
-        self.statusBar().showMessage(self.tr("All data has been cleared"),3000)           
-
-    def open_plot_selection(self):
-        
-        if self.ad:
-             self.statusBar().showMessage(self.tr("Creating plot window..."),3000)
-        else:
-            self.statusBar().showMessage(self.tr("Please load data files"),3000)
-            return
-
-        selected_plot_combo = 0
-        for i, value in enumerate(self.plot_selection_combo_list):
-            if (self.plot_selection_combo.currentText() == self.plot_selection_combo_list[i]):
-                selected_plot_combo = i        
-
-        if (self.wid):
-            if (self.wid.isWindow()):
-                # close previous instances of child windows to save system memory                
-                self.wid.close()                
-
-        if (selected_plot_combo == 0): self.wid = IVBoxPlot(self,self.param_one_combo.currentText())
-        elif (selected_plot_combo == 1): self.wid = ViolinPlot(self,self.param_one_combo.currentText())
-        elif (selected_plot_combo == 2): self.wid = CategoryScatter(self,self.param_one_combo.currentText())
-        elif (selected_plot_combo == 3): self.wid = DistWT(self,self.param_one_combo.currentText())
-        elif (selected_plot_combo == 4): self.wid = DistRM(self,self.param_one_combo.currentText())
-        elif (selected_plot_combo == 5): self.wid = DistLtoH(self)
-        elif (selected_plot_combo == 6): self.wid = IVHistPlot(self) 
-        elif (selected_plot_combo == 7): self.wid = DensEta(self) 
-        elif (selected_plot_combo == 8): self.wid = IVHistDenPlot(self) 
-        elif (selected_plot_combo == 9): self.wid = CorrVocIsc(self)
-        elif (selected_plot_combo == 10): self.wid = CorrEtaFF(self)
-        elif (selected_plot_combo == 11): self.wid = CorrRshFF(self)
-        else: return
-
-        self.wid.show() 
-        
-        self.statusBar().showMessage(self.tr("Ready"),3000)
-        
-    def set_default_filters(self):
-
-        self.filter_table_widget.clearContents()
-
-        for i, row in enumerate(self.default_filters):
-            for j, column in enumerate(self.default_filters[i]):
-                item = QtWidgets.QTableWidgetItem(str(column))
-                self.filter_table_widget.setItem(i, j, item)
-
-    def set_user_filters(self):
-
-        self.filter_table_widget.clearContents()
-
-        for i, row in enumerate(self.user_filters_plain_format):
-            for j, column in enumerate(self.user_filters_plain_format[i]):
-                item = QtWidgets.QTableWidgetItem(str(column))
-                self.filter_table_widget.setItem(i, j, item)
-
-    def load_filter_settings(self):
-
-        filename = QtWidgets.QFileDialog.getOpenFileName(self,self.tr("Open file"), self.prev_dir_path, "Filter Settings Files (*.scda)")
-        filename = filename[0]
-        
-        if (not filename):
-            return
-
-        try:
-            filename.encode('ascii')
-        except:
-            msg = self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames.")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg) 
-            return
-        
-        self.prev_dir_path = ntpath.dirname(filename)
-
-        try:
-            with open(filename,'rb') as f:
-                self.user_filters_plain_format = pickle.load(f)
-        except:
-            msg = self.tr("Could not read file \"" + ntpath.basename(filename) + "\"")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg) 
-            return
-
-        self.set_user_filters()
-            
-        self.statusBar().showMessage(self.tr("New filter settings loaded"),3000)
-
-    def save_filter_settings(self):
-
-        self.read_filter_table()
-        self.convert_user_filters()
-
-        filename = QtWidgets.QFileDialog.getSaveFileName(self,self.tr("Save file"), self.prev_dir_path, "Description Files (*.scda)")
-        filename = filename[0]
-        
-        if (not filename):
-            return
-
-        try:
-            filename.encode('ascii')
-        except:
-            msg = self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames.")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg) 
-            return
-        
-        self.prev_dir_path = ntpath.dirname(filename)
-
-        try:        
-            with open(filename, 'wb') as f:
-                pickle.dump(self.user_filters_plain_format, f)
-        except:
-            msg = self.tr("Could not save file \"" + ntpath.basename(filename) + "\"")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg) 
-            return            
-            
-        self.statusBar().showMessage(self.tr("File saved"),3000)  
-
-    def read_filter_table(self):
-        
-        self.statusBar().showMessage(self.tr("Checking filters..."),3000)
-        self.user_filters = []       
-        
-        for i in np.arange(0,12):
-            # read contents of filter table and skip rows with odd input
-            if self.filter_table_widget.item(i,0):
-                str_a = self.remove_whitespace(self.filter_table_widget.item(i,0).text())
-                if str_a in self.adindex:
-                    str_b = self.remove_whitespace(self.filter_table_widget.item(i,1).text())
-                    if str_b in ['<','>']:
-                        str_c = self.remove_whitespace(self.filter_table_widget.item(i,2).text())
-                        if self.is_number(str_c):
-                            self.user_filters.append([str_a,str_b,str_c])
-        
-        # enter checked filters back into table
-        for i in np.arange(0,12):
-            for j in np.arange(0,3):
-                if i < len(self.user_filters):
-                    item = QtWidgets.QTableWidgetItem(str(self.user_filters[i][j]))
-                    self.filter_table_widget.setItem(i, j, item)
-                else:
-                    item = QtWidgets.QTableWidgetItem("")
-                    self.filter_table_widget.setItem(i, j, item)
-
-        self.statusBar().showMessage(self.tr("Ready"),3000)
-
-    def convert_user_filters(self):
-        self.user_filters_plain_format = []
-        
-        for i, value in enumerate(self.user_filters):
-            filter_setting = []
-            filter_setting.append(str(self.user_filters[i][0]))
-            filter_setting.append(str(self.user_filters[i][1]))
-            if (float(self.user_filters[i][2]) % 1 == 0):
-                filter_setting.append(int(self.user_filters[i][2]))
-            else:                
-                filter_setting.append(float(self.user_filters[i][2]))
-        
-            self.user_filters_plain_format.append(filter_setting)        
-
-    def is_number(self,s):
-        try:
-            float(s)
-            return True
-        except ValueError:
+        dataframe = self.file_service.load_data_file(filepath, columns)
+        if dataframe is None:
             return False
 
-    def remove_whitespace(self,s):
-        str = s.replace(" ", "")
-        str = str.replace("\t", "")
-        return str
+        dataframe = self.data_service.to_numeric(dataframe)
+        dataframe = self.data_service.filter_positive_values(dataframe)
 
-    def keyPressEvent(self, e):
-        if (e.modifiers() & QtCore.Qt.ControlModifier): # Ctrl
+        if dataframe.empty:
+            return None
+
+        self.data_service.add_dataset(dataframe, '')
+        self.data_service.apply_label_format_conversion(current_index, self.label_format)
+
+        basename = self.file_service.get_basename_without_extension(filepath)
+        dataset_name = self.file_service.sanitize_filename(basename)
+        self.data_service.rename_dataset(current_index, dataset_name)
+        self._add_to_series_list(dataset_name)
+
+        logger.info("Loaded file: %s (%d rows)", filepath, len(dataframe))
+        return True
+
+    def _add_to_series_list(self, name: str):
+        item = QtGui.QStandardItem(name)
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        self.series_list_model.appendRow(item)
+
+    def _show_load_warnings(self, non_ascii: bool, read_error: bool, empty_data: bool):
+        if non_ascii:
+            self._show_warning(self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames."))
+        if read_error:
+            self._show_warning(self.tr("Error while reading data files.\n\nData labels were perhaps not recognized."))
+        if empty_data:
+            self._show_warning(self.tr("Empty data sets were found.\n\nThe application only accepts data entries with a value for Voc, Isc, FF, Eta, Rser, Rsh and Irev. All values also need to be non-negative."))
+
+    def _show_warning(self, message: str):
+        QtWidgets.QMessageBox.about(self, self.tr("Warning"), message)
+
+    def _update_status_ready(self):
+        if self.data_service.has_data():
+            self.statusBar().showMessage(self.tr("Ready"), 3000)
+        else:
+            self.statusBar().showMessage(self.tr("Please load data files"), 3000)
+
+    def save_files(self):
+        dest_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            None, self.tr('Open directory'),
+            self.file_service.previous_directory,
+            QtWidgets.QFileDialog.ShowDirsOnly
+        )
+
+        if not dest_dir:
+            return
+
+        if not self.data_service.has_data():
+            self.statusBar().showMessage(self.tr("Please load data files"), 3000)
+            return
+
+        self.file_service.previous_directory = dest_dir
+        yes_to_all = False
+
+        for idx in sorted(self.data_service.datasets.keys()):
+            filename = f'{self.data_service.get_dataset_name(idx)}.csv'
+            save_path = self.file_service.get_save_path(dest_dir, filename)
+            save_path = self._check_overwrite(save_path, filename, yes_to_all)
+
+            if save_path is None:
+                continue
+            if save_path is False:
+                return
+
+            self.file_service.save_csv(self.data_service.get_dataset(idx), save_path)
+
+        self.statusBar().showMessage(self.tr("Files saved"), 3000)
+
+    def _check_overwrite(self, save_path: str, filename: str, yes_to_all: bool):
+        if not yes_to_all and self.file_service.check_overwrite(save_path):
+            reply = QtWidgets.QMessageBox.question(
+                self, self.tr("Message"),
+                f"Overwrite '{filename}'?",
+                QtWidgets.QMessageBox.YesToAll | QtWidgets.QMessageBox.Yes |
+                QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.No
+            )
+
+            if reply == QtWidgets.QMessageBox.No:
+                new_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                    self, self.tr("Save file"),
+                    save_path, "CSV File (*.csv)"
+                )
+                return new_path if new_path else None
+
+            if reply == QtWidgets.QMessageBox.YesToAll:
+                return save_path
+
+            if reply == QtWidgets.QMessageBox.Cancel:
+                return False
+
+        return save_path
+
+    def combine_datasets(self):
+        if self.data_service.get_dataset_count() <= 1:
+            self._update_status_ready()
+            return
+
+        self.statusBar().showMessage(self.tr("Combining data sets..."), 3000)
+        self.report_generator.clear_yield_loss()
+
+        self.series_list_model.clear()
+        self.series_list_model.setHorizontalHeaderLabels([self.tr('Data series')])
+
+        self.data_service.combine_datasets()
+        self._add_to_series_list(self.data_service.get_dataset_name(0))
+
+        self.statusBar().showMessage(self.tr("Ready"), 3000)
+
+    def filter_data(self):
+        if not self.data_service.has_data():
+            self._update_status_ready()
+            return
+
+        self.statusBar().showMessage(self.tr("Filtering data..."), 3000)
+        self._read_filter_table()
+
+        for idx in sorted(self.data_service.datasets.keys()):
+            if idx >= len(self.report_generator.yield_loss_data):
+                dataset = self.data_service.get_dataset(idx)
+                dataset_filtered, yield_loss = self.filter_service.apply_filters(dataset)
+                self.data_service.datasets[idx] = dataset_filtered
+                self.report_generator.add_yield_loss(yield_loss)
+                self.data_service.reset_dataset_index(idx)
+                self.data_service.fill_empty_dataset(idx)
+
+        self._refresh_series_list()
+        self.statusBar().showMessage(self.tr("Ready"), 3000)
+
+    def _refresh_series_list(self):
+        self.series_list_model.clear()
+        self.series_list_model.setHorizontalHeaderLabels([self.tr('Data series')])
+        for idx in sorted(self.data_service.datasets.keys()):
+            self._add_to_series_list(self.data_service.get_dataset_name(idx))
+
+    def make_report(self):
+        if not self.data_service.has_data():
+            self._update_status_ready()
+            return
+
+        report_path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, self.tr("Save file"),
+            self.file_service.previous_directory,
+            "Excel Files (*.xlsx)"
+        )
+
+        if not report_path:
+            return
+
+        if not self.file_service.is_ascii_filename(report_path):
+            self._show_warning(self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames."))
+            self.report_name = ''
+            return
+
+        self.statusBar().showMessage(self.tr("Making an Excel report..."), 3000)
+
+        result = self.report_generator.create_report(report_path, self)
+        if result:
+            self.report_name = result
+            self.statusBar().showMessage(self.tr("Ready"), 3000)
+
+    def open_report(self):
+        if not self.report_name:
+            self.statusBar().showMessage(self.tr("Please make report"), 3000)
+            return
+
+        self.statusBar().showMessage(self.tr("Opening report..."), 3000)
+        url = self.file_service.get_file_url(self.report_name)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(url, QtCore.QUrl.StrictMode))
+        self.statusBar().showMessage(self.tr("Ready"), 3000)
+
+    def clear_data(self):
+        self.data_service.clear_all()
+        self.report_generator.clear_yield_loss()
+        self.series_list_model.clear()
+        self.series_list_model.setHorizontalHeaderLabels([self.tr('Data series')])
+        self.report_name = ''
+        self.statusBar().showMessage(self.tr("All data has been cleared"), 3000)
+
+    def open_plot_selection(self):
+        if not self.data_service.has_data():
+            self._update_status_ready()
+            return
+
+        self.statusBar().showMessage(self.tr("Creating plot window..."), 3000)
+
+        selected_plot = PlotType(self.plot_selection_combo.currentIndex())
+
+        if self.plot_window and self.plot_window.isWindow():
+            self.plot_window.close()
+
+        param_text = self.param_one_combo.currentText()
+        plot_classes = {
+            PlotType.BOXPLOT: lambda: IVBoxPlot(self, param_text),
+            PlotType.VIOLINPLOT: lambda: ViolinPlot(self, param_text),
+            PlotType.CATEGORY_SCATTER: lambda: CategoryScatter(self, param_text),
+            PlotType.WALKTHROUGH: lambda: DistWT(self, param_text),
+            PlotType.ROLLING_MEAN: lambda: DistRM(self, param_text),
+            PlotType.LOW_TO_HIGH: lambda: DistLtoH(self),
+            PlotType.HISTOGRAM: lambda: IVHistPlot(self),
+            PlotType.DENSITY: lambda: DensEta(self),
+            PlotType.HISTOGRAM_DENSITY: lambda: IVHistDenPlot(self),
+            PlotType.CORR_VOC_ISC: lambda: CorrVocIsc(self),
+            PlotType.CORR_ETA_FF: lambda: CorrEtaFF(self),
+            PlotType.CORR_RSH_FF: lambda: CorrRshFF(self),
+        }
+
+        if selected_plot in plot_classes:
+            self.plot_window = plot_classes[selected_plot]()
+            self.plot_window.show()
+
+        self.statusBar().showMessage(self.tr("Ready"), 3000)
+
+    def _set_default_filters(self):
+        self._populate_filter_table(self.filter_service.get_default_filters())
+
+    def _set_user_filters(self):
+        self._populate_filter_table(self.filter_service.user_filters_plain)
+
+    def _populate_filter_table(self, filters):
+        self.filter_table_widget.clearContents()
+        for row_idx, row_data in enumerate(filters):
+            for col_idx, value in enumerate(row_data):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                self.filter_table_widget.setItem(row_idx, col_idx, item)
+
+    def load_filter_settings(self):
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, self.tr("Open file"),
+            self.file_service.previous_directory,
+            "Filter Settings Files (*.scda)"
+        )
+
+        if not filename:
+            return
+
+        if not self.file_service.is_ascii_filename(filename):
+            self._show_warning(self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames."))
+            return
+
+        self.file_service.update_previous_directory(filename)
+        filters = self.file_service.load_filters(filename)
+
+        if filters:
+            self.filter_service.load_plain_filters(filters)
+            self._set_user_filters()
+            self.statusBar().showMessage(self.tr("New filter settings loaded"), 3000)
+
+    def save_filter_settings(self):
+        self._read_filter_table()
+        self.filter_service.convert_to_plain_format()
+
+        filename, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, self.tr("Save file"),
+            self.file_service.previous_directory,
+            "Description Files (*.scda)"
+        )
+
+        if not filename:
+            return
+
+        if not self.file_service.is_ascii_filename(filename):
+            self._show_warning(self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames."))
+            return
+
+        self.file_service.update_previous_directory(filename)
+        self.file_service.save_filters(self.filter_service.user_filters_plain, filename)
+        self.statusBar().showMessage(self.tr("File saved"), 3000)
+
+    def _read_filter_table(self):
+        self.statusBar().showMessage(self.tr("Checking filters..."), 3000)
+        table_data = []
+
+        for row in range(FilterConfig.MAX_FILTERS):
+            if self.filter_table_widget.item(row, 0):
+                param = self.filter_service.remove_whitespace(
+                    self.filter_table_widget.item(row, 0).text()
+                )
+                operator = self.filter_service.remove_whitespace(
+                    self.filter_table_widget.item(row, 1).text()
+                )
+                value = self.filter_service.remove_whitespace(
+                    self.filter_table_widget.item(row, 2).text()
+                )
+                table_data.append((param, operator, value))
+
+        self.filter_service.parse_filters_from_table_data(table_data)
+        self._update_filter_table_display()
+        self.statusBar().showMessage(self.tr("Ready"), 3000)
+
+    def _update_filter_table_display(self):
+        filters_for_table = self.filter_service.get_filters_for_table()
+        for row in range(FilterConfig.MAX_FILTERS):
+            for col in range(3):
+                if row < len(filters_for_table):
+                    text = filters_for_table[row][col]
+                else:
+                    text = ""
+                item = QtWidgets.QTableWidgetItem(text)
+                self.filter_table_widget.setItem(row, col, item)
+
+    def keyPressEvent(self, event):
+        if event.modifiers() & QtCore.Qt.ControlModifier:
             selected = self.filter_table_widget.selectedRanges()
-                 
-            if e.key() == QtCore.Qt.Key_V: # Paste
-                first_row = selected[0].topRow()
-                first_col = selected[0].leftColumn()
-                 
-                #copied text is split by '\n' and '\t' to paste to the cells
-                for r, row in enumerate(self.clip.text().split('\n')):
-                    for c, text in enumerate(row.split('\t')):
-                        if len(text): # fixes bug where elements below pasted element are deleted
-                            self.filter_table_widget.setItem(first_row+r, first_col+c, QtWidgets.QTableWidgetItem(text))
- 
-            elif e.key() == QtCore.Qt.Key_C: # Copy
-                s = ""
-                for r in range(selected[0].topRow(),selected[0].bottomRow()+1):
-                    for c in range(selected[0].leftColumn(),selected[0].rightColumn()+1):
-                        try:
-                            s += str(self.filter_table_widget.item(r,c).text()) + "\t"
-                        except AttributeError:
-                            s += "\t"
-                    s = s[:-1] + "\n" #eliminate last '\t'
-                self.clip.setText(s)
+
+            if event.key() == QtCore.Qt.Key_V:
+                self._paste_filter_cells(selected[0])
+            elif event.key() == QtCore.Qt.Key_C:
+                self._copy_filter_cells(selected[0])
+
+    def _paste_filter_cells(self, selection):
+        first_row = selection.topRow()
+        first_col = selection.leftColumn()
+
+        for row_delta, row_text in enumerate(self.clipboard.text().split('\n')):
+            for col_delta, cell_text in enumerate(row_text.split('\t')):
+                if cell_text:
+                    item = QtWidgets.QTableWidgetItem(cell_text)
+                    self.filter_table_widget.setItem(
+                        first_row + row_delta,
+                        first_col + col_delta,
+                        item
+                    )
+
+    def _copy_filter_cells(self, selection):
+        text = ""
+        for row in range(selection.topRow(), selection.bottomRow() + 1):
+            for col in range(selection.leftColumn(), selection.rightColumn() + 1):
+                try:
+                    text += str(self.filter_table_widget.item(row, col).text()) + "\t"
+                except AttributeError:
+                    text += "\t"
+            text = text[:-1] + "\n"
+        self.clipboard.setText(text)
+
+    def _set_label_format(self, format_id: LabelFormat, label_text: str):
+        self.label_format = format_id
+        self.statusBar().removeWidget(self.label_text)
+        self.label_text = QtWidgets.QLabel(label_text)
+        self.statusBar().addPermanentWidget(self.label_text)
 
     def set_data_format0(self):
-    # defining one function with a numerical argument does not work, strangely
-    # it sets the parameter prematurely
-        self.label_format = 0
-        
-        self.statusBar().removeWidget(self.label_text)
-        self.label_text = QtWidgets.QLabel("Data label set A")
-        self.statusBar().addPermanentWidget(self.label_text)        
+        self._set_label_format(LabelFormat.A, "Data label set A")
 
     def set_data_format1(self):
-        self.label_format = 1
-
-        self.statusBar().removeWidget(self.label_text)        
-        self.label_text = QtWidgets.QLabel("Data label set B")      
-        self.statusBar().addPermanentWidget(self.label_text)        
+        self._set_label_format(LabelFormat.B, "Data label set B")
 
     def set_data_format2(self):
-        self.label_format = 2
-
-        self.statusBar().removeWidget(self.label_text)        
-        self.label_text = QtWidgets.QLabel("Data label set C")  
-        self.statusBar().addPermanentWidget(self.label_text)        
+        self._set_label_format(LabelFormat.C, "Data label set C")
 
     def set_data_format3(self):
-        self.label_format = 3
-
-        self.statusBar().removeWidget(self.label_text)        
-        self.label_text = QtWidgets.QLabel("Data label set D") 
-        self.statusBar().addPermanentWidget(self.label_text)        
+        self._set_label_format(LabelFormat.D, "Data label set D")
 
     def set_data_format4(self):
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, self.tr("Open file"),
+            self.file_service.previous_directory,
+            "Label Settings File (*.csv)"
+        )
 
-        filename = QtWidgets.QFileDialog.getOpenFileName(self,self.tr("Open file"), self.prev_dir_path, "Label Settings File (*.csv)")
-        filename = filename[0]
-        
-        if (not filename):
+        if not filename:
             return
 
-        try:
-            filename.encode('ascii')
-        except:
-            msg = self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames.")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg) 
-            return
-        
-        self.prev_dir_path = ntpath.dirname(filename)
-
-        try:
-            with open(filename,'rb') as f:
-                first_line = f.readline()
-        except:
-            msg = self.tr("Could not read file \"" + ntpath.basename(filename) + "\"")
-            QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg) 
+        if not self.file_service.is_ascii_filename(filename):
+            self._show_warning(self.tr("Filenames with non-ASCII characters were found.\n\nThe application currently only supports ASCII filenames."))
             return
 
-        first_line = first_line.decode("utf-8")
-        first_line = "".join(first_line.split())      
-        self.label_formats[4] = first_line.split(",")
-        self.label_format = 4
+        self.file_service.update_previous_directory(filename)
+        labels = self.file_service.load_custom_labels(filename)
 
-        msg = self.tr('Data series') + ": " + str(self.label_formats[4])
-        QtWidgets.QMessageBox.about(self, self.tr("Warning"), msg) 
+        if labels:
+            DataColumns.LABEL_FORMATS[LabelFormat.CUSTOM] = labels
+            self._set_label_format(LabelFormat.CUSTOM, "Custom label set")
+            self._show_warning(self.tr('Data series') + ": " + str(labels))
 
-        self.statusBar().showMessage(self.tr("Ready"),3000)   
+        self.statusBar().showMessage(self.tr("Ready"), 3000)
 
-        self.statusBar().removeWidget(self.label_text)        
-        self.label_text = QtWidgets.QLabel("Custom label set") 
-        self.statusBar().addPermanentWidget(self.label_text)        
+    def _switch_language(self, translation_file: str = None):
+        if self.translator:
+            QtWidgets.QApplication.removeTranslator(self.translator)
+
+        if translation_file:
+            self.translator = QtCore.QTranslator()
+            self.translator.load(translation_file)
+            QtWidgets.QApplication.installTranslator(self.translator)
+
+        self.menuBar().clear()
+        self._create_menu()
+        self.param_one_combo.clear()
+        self.plot_selection_combo.clear()
+        self.main_frame.deleteLater()
+        self._create_main_frame()
 
     def langKor(self):
-        if self.translator:
-            QtWidgets.QApplication.removeTranslator(self.translator)
-        
-        self.translator = QtCore.QTranslator()
-        self.translator.load(":IVMain_kr.qm")
-        QtWidgets.QApplication.installTranslator(self.translator)
-
-        self.menuBar().clear()
-        self.create_menu()
-        self.param_one_combo.clear()
-        self.plot_selection_combo.clear()        
-        self.main_frame.deleteLater()       
-        self.create_main_frame()
+        self._switch_language(":IVMain_kr.qm")
 
     def langChin(self):
-        if self.translator:
-            QtWidgets.QApplication.removeTranslator(self.translator)
-        
-        self.translator = QtCore.QTranslator()
-        self.translator.load(":IVMain_cn.qm")
-        QtWidgets.QApplication.installTranslator(self.translator)
-
-        self.menuBar().clear()
-        self.create_menu()
-        self.param_one_combo.clear()
-        self.plot_selection_combo.clear()   
-        self.main_frame.deleteLater()       
-        self.create_main_frame()
+        self._switch_language(":IVMain_cn.qm")
 
     def langEngl(self):
-        if self.translator:
-            QtWidgets.QApplication.removeTranslator(self.translator)
-
-        self.menuBar().clear()
-        self.create_menu()
-        self.param_one_combo.clear()
-        self.plot_selection_combo.clear()        
-        self.main_frame.deleteLater()        
-        self.create_main_frame()
+        self._switch_language(None)
 
     def open_help_dialog(self):
         help_dialog = HelpDialog(self)
@@ -794,12 +544,26 @@ class IVMainGui(QtWidgets.QMainWindow):
     def on_about(self):
         msg = self.tr("Solar cell data analysis\nAuthor: Ronald Naber\nLicense: Public domain")
         QtWidgets.QMessageBox.about(self, self.tr("About the application"), msg)
-    
-    def create_main_frame(self):
-        self.setWindowTitle(self.tr("Solar cell data analysis")) # do this again so that translator can catch it
-        self.main_frame = QtWidgets.QWidget()        
 
-        ##### left vbox #####     
+    def _create_main_frame(self):
+        self.setWindowTitle(self.tr("Solar cell data analysis"))
+        self.main_frame = QtWidgets.QWidget()
+
+        left_vbox = self._create_left_panel()
+        mid_vbox = self._create_mid_panel()
+        right_vbox = self._create_right_panel()
+
+        hbox = QtWidgets.QHBoxLayout()
+        hbox.addLayout(left_vbox, stretch=1)
+        hbox.addLayout(mid_vbox, stretch=1)
+        hbox.addLayout(right_vbox, stretch=2)
+
+        self.main_frame.setLayout(hbox)
+        self.setCentralWidget(self.main_frame)
+        self.statusBar().addPermanentWidget(self.label_text)
+        self.statusBar().addPermanentWidget(self.status_text, 1)
+
+    def _create_left_panel(self):
         self.series_list_view = QtWidgets.QTreeView()
         self.series_list_view.setModel(self.series_list_model)
         self.series_list_model.setHorizontalHeaderLabels([self.tr('Data series')])
@@ -807,6 +571,14 @@ class IVMainGui(QtWidgets.QMainWindow):
         self.series_list_view.setDragDropMode(QtWidgets.QAbstractItemView.NoDragDrop)
         self.series_list_view.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
 
+        buttonbox = self._create_data_button_box()
+
+        left_vbox = QtWidgets.QVBoxLayout()
+        left_vbox.addWidget(self.series_list_view)
+        left_vbox.addWidget(buttonbox)
+        return left_vbox
+
+    def _create_data_button_box(self):
         open_files_button = QtWidgets.QPushButton()
         open_files_button.clicked.connect(self.load_file)
         open_files_button.setIcon(QtGui.QIcon(":open.png"))
@@ -814,11 +586,11 @@ class IVMainGui(QtWidgets.QMainWindow):
         open_files_button.setStatusTip(self.tr("Load files"))
 
         save_files_button = QtWidgets.QPushButton()
-        save_files_button.clicked.connect(self.save_files)        
+        save_files_button.clicked.connect(self.save_files)
         save_files_button.setIcon(QtGui.QIcon(":save.png"))
         save_files_button.setToolTip(self.tr("Save files"))
         save_files_button.setStatusTip(self.tr("Save files"))
-        
+
         combine_data_button = QtWidgets.QPushButton()
         combine_data_button.clicked.connect(self.combine_datasets)
         combine_data_button.setIcon(QtGui.QIcon(":combine.png"))
@@ -831,23 +603,30 @@ class IVMainGui(QtWidgets.QMainWindow):
         clear_data_button.setToolTip(self.tr("Remove all data sets"))
         clear_data_button.setStatusTip(self.tr("Remove all data sets"))
 
-        buttonbox0 = QtWidgets.QDialogButtonBox()
-        buttonbox0.addButton(open_files_button, QtWidgets.QDialogButtonBox.ActionRole)
-        buttonbox0.addButton(save_files_button, QtWidgets.QDialogButtonBox.ActionRole)
-        buttonbox0.addButton(combine_data_button, QtWidgets.QDialogButtonBox.ActionRole)
-        buttonbox0.addButton(clear_data_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox = QtWidgets.QDialogButtonBox()
+        buttonbox.addButton(open_files_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(save_files_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(combine_data_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(clear_data_button, QtWidgets.QDialogButtonBox.ActionRole)
+        return buttonbox
 
-        left_vbox = QtWidgets.QVBoxLayout()
-        left_vbox.addWidget(self.series_list_view)
-        left_vbox.addWidget(buttonbox0)
-
-        ##### middle vbox #####
+    def _create_mid_panel(self):
         self.filter_table_widget.setRowCount(12)
         self.filter_table_widget.setColumnCount(3)
-        self.filter_table_widget.setHorizontalHeaderLabels((self.tr('Parameter'),self.tr('< or >'),self.tr('Number')))
+        self.filter_table_widget.setHorizontalHeaderLabels(
+            (self.tr('Parameter'), self.tr('< or >'), self.tr('Number'))
+        )
         self.filter_table_widget.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        self.filter_table_widget.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)       
-        
+        self.filter_table_widget.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+
+        buttonbox = self._create_filter_button_box()
+
+        mid_vbox = QtWidgets.QVBoxLayout()
+        mid_vbox.addWidget(self.filter_table_widget)
+        mid_vbox.addWidget(buttonbox)
+        return mid_vbox
+
+    def _create_filter_button_box(self):
         open_filters_button = QtWidgets.QPushButton()
         open_filters_button.clicked.connect(self.load_filter_settings)
         open_filters_button.setIcon(QtGui.QIcon(":open.png"))
@@ -855,41 +634,62 @@ class IVMainGui(QtWidgets.QMainWindow):
         open_filters_button.setStatusTip(self.tr("Load filter settings"))
 
         save_filters_button = QtWidgets.QPushButton()
-        save_filters_button.clicked.connect(self.save_filter_settings)        
+        save_filters_button.clicked.connect(self.save_filter_settings)
         save_filters_button.setIcon(QtGui.QIcon(":save.png"))
         save_filters_button.setToolTip(self.tr("Save filter settings"))
-        save_filters_button.setStatusTip(self.tr("Save filter settings"))        
+        save_filters_button.setStatusTip(self.tr("Save filter settings"))
 
         check_filters_button = QtWidgets.QPushButton()
-        check_filters_button.clicked.connect(self.read_filter_table) 
+        check_filters_button.clicked.connect(self._read_filter_table)
         check_filters_button.setIcon(QtGui.QIcon(":check.png"))
         check_filters_button.setToolTip(self.tr("Check filters"))
         check_filters_button.setStatusTip(self.tr("Check filters"))
-        
+
         execute_filters_button = QtWidgets.QPushButton()
-        execute_filters_button.clicked.connect(self.filter_data) 
+        execute_filters_button.clicked.connect(self.filter_data)
         execute_filters_button.setIcon(QtGui.QIcon(":filter.png"))
         execute_filters_button.setToolTip(self.tr("Execute filters"))
         execute_filters_button.setStatusTip(self.tr("Execute filters"))
 
         default_filters_button = QtWidgets.QPushButton()
-        default_filters_button.clicked.connect(self.set_default_filters)
+        default_filters_button.clicked.connect(self._set_default_filters)
         default_filters_button.setIcon(QtGui.QIcon(":revert.png"))
         default_filters_button.setToolTip(self.tr("Reload default filters"))
         default_filters_button.setStatusTip(self.tr("Reload default filters"))
 
-        buttonbox1 = QtWidgets.QDialogButtonBox()
-        buttonbox1.addButton(open_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
-        buttonbox1.addButton(save_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
-        buttonbox1.addButton(check_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
-        buttonbox1.addButton(execute_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
-        buttonbox1.addButton(default_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox = QtWidgets.QDialogButtonBox()
+        buttonbox.addButton(open_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(save_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(check_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(execute_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(default_filters_button, QtWidgets.QDialogButtonBox.ActionRole)
+        return buttonbox
 
-        mid_vbox = QtWidgets.QVBoxLayout()
-        mid_vbox.addWidget(self.filter_table_widget)                                                                                                                                                                                                           
-        mid_vbox.addWidget(buttonbox1) 
-        
-        ##### top buttonbox #####
+    def _create_right_panel(self):
+        top_buttonbox = self._create_top_button_box()
+
+        self.param_one_combo = QtWidgets.QComboBox(self)
+        self.plot_selection_combo = QtWidgets.QComboBox(self)
+        self.plot_selection_combo.currentIndexChanged.connect(self._on_plot_selection_changed)
+
+        for item in PlotParameters.SELECTION_LIST:
+            self.param_one_combo.addItem(item)
+        self.param_one_combo.setCurrentIndex(4)
+
+        for item in PlotParameters.COMBO_LIST:
+            self.plot_selection_combo.addItem(item)
+
+        hbox1 = QtWidgets.QHBoxLayout()
+        hbox1.addWidget(self.param_one_combo)
+        hbox1.addWidget(self.plot_selection_combo)
+
+        right_vbox = QtWidgets.QVBoxLayout()
+        right_vbox.addWidget(top_buttonbox)
+        right_vbox.addLayout(hbox1)
+        right_vbox.addStretch(1)
+        return right_vbox
+
+    def _create_top_button_box(self):
         report_button = QtWidgets.QPushButton()
         report_button.clicked.connect(self.make_report)
         report_button.setIcon(QtGui.QIcon(":report.png"))
@@ -908,154 +708,139 @@ class IVMainGui(QtWidgets.QMainWindow):
         plotselection_button.setToolTip(self.tr("Plot selection"))
         plotselection_button.setStatusTip(self.tr("Plot selection"))
 
-        top_buttonbox = QtWidgets.QDialogButtonBox()
-        top_buttonbox.addButton(report_button, QtWidgets.QDialogButtonBox.ActionRole)
-        top_buttonbox.addButton(openreport_button, QtWidgets.QDialogButtonBox.ActionRole)
-        top_buttonbox.addButton(plotselection_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox = QtWidgets.QDialogButtonBox()
+        buttonbox.addButton(report_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(openreport_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttonbox.addButton(plotselection_button, QtWidgets.QDialogButtonBox.ActionRole)
+        return buttonbox
 
-        for i in self.plot_selection_list:
-            self.param_one_combo.addItem(i)               
-        self.param_one_combo.setCurrentIndex(4)
+    def _create_menu(self):
+        self._create_file_menu()
+        self._create_edit_menu()
+        self._create_view_menu()
+        self._create_settings_menu()
+        self._create_help_menu()
 
-        for i in self.plot_selection_combo_list:
-            self.plot_selection_combo.addItem(i)
-        
-        toolbar_hbox = QtWidgets.QHBoxLayout()
-        toolbar_hbox.addWidget(top_buttonbox)
-        toolbar_hbox.addWidget(self.param_one_combo) 
-        toolbar_hbox.addWidget(self.plot_selection_combo)
+    def _create_file_menu(self):
+        file_menu = self.menuBar().addMenu(self.tr("&File"))
 
-        ##### main layout settings #####
-        top_hbox = QtWidgets.QHBoxLayout()
-        top_hbox.addLayout(left_vbox)
-        top_hbox.addLayout(mid_vbox)
-  
-        vbox = QtWidgets.QVBoxLayout()
-        vbox.addLayout(toolbar_hbox) 
-        vbox.addLayout(top_hbox)           
-                                       
-        self.main_frame.setLayout(vbox)
-
-        self.setCentralWidget(self.main_frame)
-        
-        self.statusBar().addWidget(self.status_text,1)
-        
-        if self.first_run:
-            # need to remove it when changing language as this calls this function again
-            self.statusBar().removeWidget(self.label_text)
-            self.first_run = False
-            
-        self.statusBar().addPermanentWidget(self.label_text)
-
-    def create_menu(self):
-        self.file_menu = self.menuBar().addMenu(self.tr("File"))
-
-        tip = self.tr("Open file")        
-        load_action = QtWidgets.QAction(self.tr("Open..."), self)
+        load_action = QtWidgets.QAction(self.tr("&Load files"), self)
         load_action.setIcon(QtGui.QIcon(":open.png"))
-        load_action.triggered.connect(self.load_file) 
-        load_action.setToolTip(tip)
-        load_action.setStatusTip(tip)
-        load_action.setShortcut('Ctrl+O')    
+        load_action.triggered.connect(self.load_file)
+        load_action.setShortcut('Ctrl+L')
 
-        tip = self.tr("Quit")        
-        quit_action = QtWidgets.QAction(self.tr("Quit"), self)
+        save_action = QtWidgets.QAction(self.tr("&Save files"), self)
+        save_action.setIcon(QtGui.QIcon(":save.png"))
+        save_action.triggered.connect(self.save_files)
+        save_action.setShortcut('Ctrl+S')
+
+        report_action = QtWidgets.QAction(self.tr("&Make report"), self)
+        report_action.setIcon(QtGui.QIcon(":report.png"))
+        report_action.triggered.connect(self.make_report)
+        report_action.setShortcut('Ctrl+R')
+
+        openreport_action = QtWidgets.QAction(self.tr("Open report"), self)
+        openreport_action.setIcon(QtGui.QIcon(":link.png"))
+        openreport_action.triggered.connect(self.open_report)
+        openreport_action.setShortcut('Ctrl+Shift+R')
+
+        clear_action = QtWidgets.QAction(self.tr("&Clear all data"), self)
+        clear_action.setIcon(QtGui.QIcon(":erase.png"))
+        clear_action.triggered.connect(self.clear_data)
+
+        quit_action = QtWidgets.QAction(self.tr("&Quit"), self)
         quit_action.setIcon(QtGui.QIcon(":quit.png"))
-        quit_action.triggered.connect(self.close) 
-        quit_action.setToolTip(tip)
-        quit_action.setStatusTip(tip)
+        quit_action.triggered.connect(self.close)
         quit_action.setShortcut('Ctrl+Q')
 
-        self.file_menu.addAction(load_action)       
-        self.file_menu.addAction(quit_action)
+        file_menu.addAction(load_action)
+        file_menu.addAction(save_action)
+        file_menu.addSeparator()
+        file_menu.addAction(report_action)
+        file_menu.addAction(openreport_action)
+        file_menu.addSeparator()
+        file_menu.addAction(clear_action)
+        file_menu.addSeparator()
+        file_menu.addAction(quit_action)
 
-        self.edit_menu = self.menuBar().addMenu(self.tr("Data labels"))
+    def _create_edit_menu(self):
+        edit_menu = self.menuBar().addMenu(self.tr("&Edit"))
 
-        tip = "Uoc,Isc,RserLfDfIEC,Rsh,FF,Eta,IRev1"
-        format_action0 = QtWidgets.QAction(self.tr("Custom labels") + " A", self)
-        format_action0.setIcon(QtGui.QIcon(":label.png"))
-        format_action0.triggered.connect(self.set_data_format0)         
-        format_action0.setToolTip(tip)
-        format_action0.setStatusTip(tip)
-        
-        tip = "Uoc0,Isc0,Rseries_multi_level,Rshunt_SC,Fill0*100,Eff0*100,Ireverse_2"
-        format_action1 = QtWidgets.QAction(self.tr("Custom labels") + " B", self)
-        format_action1.setIcon(QtGui.QIcon(":label.png"))
-        format_action1.triggered.connect(self.set_data_format1)
-        format_action1.setToolTip(tip)
-        format_action1.setStatusTip(tip)      
+        combine_action = QtWidgets.QAction(self.tr("&Combine data sets"), self)
+        combine_action.setIcon(QtGui.QIcon(":combine.png"))
+        combine_action.triggered.connect(self.combine_datasets)
 
-        tip = "Uoc,Isc,RserIEC891,RshuntDfDr,FF,Eta,IRev1"
-        format_action2 = QtWidgets.QAction(self.tr("Custom labels") + " C", self)
-        format_action2.setIcon(QtGui.QIcon(":label.png"))
-        format_action2.triggered.connect(self.set_data_format2) 
-        format_action2.setToolTip(tip)
-        format_action2.setStatusTip(tip)
+        filter_action = QtWidgets.QAction(self.tr("&Filter data"), self)
+        filter_action.setIcon(QtGui.QIcon(":filter.png"))
+        filter_action.triggered.connect(self.filter_data)
 
-        tip = "Uoc,Isc,Rs,Rsh,FF,NCell*100,Irev2"
-        format_action3 = QtWidgets.QAction(self.tr("Custom labels") + " D", self)
-        format_action3.setIcon(QtGui.QIcon(":label.png"))
-        format_action3.triggered.connect(self.set_data_format3) 
-        format_action3.setToolTip(tip)
-        format_action3.setStatusTip(tip)
+        edit_menu.addAction(combine_action)
+        edit_menu.addAction(filter_action)
 
-        tip = self.tr("Custom labels")
-        format_action4 = QtWidgets.QAction(self.tr("Custom labels"), self)
-        format_action4.setIcon(QtGui.QIcon(":label.png"))
-        format_action4.triggered.connect(self.set_data_format4) 
-        format_action4.setToolTip(tip)
-        format_action4.setStatusTip(tip)
+    def _create_view_menu(self):
+        view_menu = self.menuBar().addMenu(self.tr("&View"))
 
-        self.edit_menu.addAction(format_action0)        
-        self.edit_menu.addAction(format_action1)
-        self.edit_menu.addAction(format_action2)
-        self.edit_menu.addAction(format_action3)        
-        self.edit_menu.addAction(format_action4) 
+        plot_action = QtWidgets.QAction(self.tr("&Plot"), self)
+        plot_action.setIcon(QtGui.QIcon(":chart.png"))
+        plot_action.triggered.connect(self.open_plot_selection)
+        plot_action.setShortcut('Ctrl+P')
 
-        self.lang_menu = self.menuBar().addMenu(self.tr("Language"))
-        
-        tip = self.tr("Switch to Chinese language")
-        cn_action = QtWidgets.QAction(self.tr("Chinese"), self)
-        cn_action.setIcon(QtGui.QIcon(":lang.png"))
-        cn_action.triggered.connect(self.langChin)        
-        cn_action.setToolTip(tip)
-        cn_action.setStatusTip(tip)       
+        view_menu.addAction(plot_action)
 
-        tip = self.tr("Switch to Korean language")
-        kr_action = QtWidgets.QAction(self.tr("Korean"), self)
-        kr_action.setIcon(QtGui.QIcon(":lang.png"))
-        kr_action.triggered.connect(self.langKor)
-        kr_action.setToolTip(tip)
-        kr_action.setStatusTip(tip)  
+    def _create_settings_menu(self):
+        settings_menu = self.menuBar().addMenu(self.tr("&Settings"))
+        self._create_label_submenu(settings_menu)
+        self._create_language_submenu(settings_menu)
 
-        tip = self.tr("Switch to English language")
-        en_action = QtWidgets.QAction(self.tr("English"), self)
-        en_action.setIcon(QtGui.QIcon(":lang.png"))
-        en_action.triggered.connect(self.langEngl)
-        en_action.setToolTip(tip)
-        en_action.setStatusTip(tip) 
+    def _create_label_submenu(self, parent_menu):
+        label_submenu = parent_menu.addMenu(self.tr("&Label set"))
 
-        self.lang_menu.addAction(cn_action)
-        self.lang_menu.addAction(kr_action)
-        self.lang_menu.addAction(en_action)
+        label0_action = QtWidgets.QAction(self.tr("&A"), self)
+        label0_action.triggered.connect(self.set_data_format0)
 
-        self.help_menu = self.menuBar().addMenu(self.tr("Help"))
+        label1_action = QtWidgets.QAction(self.tr("&B"), self)
+        label1_action.triggered.connect(self.set_data_format1)
 
-        tip = self.tr("Help information")        
-        help_action = QtWidgets.QAction(self.tr("Help..."), self)
-        help_action.setIcon(QtGui.QIcon(":help.png"))
-        help_action.triggered.connect(self.open_help_dialog)         
-        help_action.setToolTip(tip)
-        help_action.setStatusTip(tip)
-        help_action.setShortcut('H')
+        label2_action = QtWidgets.QAction(self.tr("&C"), self)
+        label2_action.triggered.connect(self.set_data_format2)
 
-        tip = self.tr("About the application")
-        about_action = QtWidgets.QAction(self.tr("About..."), self)
-        about_action.setIcon(QtGui.QIcon(":info.png"))
+        label3_action = QtWidgets.QAction(self.tr("&D"), self)
+        label3_action.triggered.connect(self.set_data_format3)
+
+        label4_action = QtWidgets.QAction(self.tr("&Custom"), self)
+        label4_action.triggered.connect(self.set_data_format4)
+
+        label_submenu.addAction(label0_action)
+        label_submenu.addAction(label1_action)
+        label_submenu.addAction(label2_action)
+        label_submenu.addAction(label3_action)
+        label_submenu.addAction(label4_action)
+
+    def _create_language_submenu(self, parent_menu):
+        lang_submenu = parent_menu.addMenu(self.tr("&Language"))
+
+        engl_action = QtWidgets.QAction(self.tr("&English"), self)
+        engl_action.triggered.connect(self.langEngl)
+
+        chin_action = QtWidgets.QAction(self.tr("&Chinese"), self)
+        chin_action.triggered.connect(self.langChin)
+
+        kor_action = QtWidgets.QAction(self.tr("&Korean"), self)
+        kor_action.triggered.connect(self.langKor)
+
+        lang_submenu.addAction(engl_action)
+        lang_submenu.addAction(chin_action)
+        lang_submenu.addAction(kor_action)
+
+    def _create_help_menu(self):
+        help_menu = self.menuBar().addMenu(self.tr("&Help"))
+
+        help_action = QtWidgets.QAction(self.tr("&Help"), self)
+        help_action.triggered.connect(self.open_help_dialog)
+        help_action.setShortcut('F1')
+
+        about_action = QtWidgets.QAction(self.tr("&About"), self)
         about_action.triggered.connect(self.on_about)
-        about_action.setToolTip(tip)
-        about_action.setStatusTip(tip)
-        about_action.setShortcut('F1')
 
-        self.help_menu.addAction(help_action)
-        self.help_menu.addAction(about_action)
+        help_menu.addAction(help_action)
+        help_menu.addAction(about_action)
