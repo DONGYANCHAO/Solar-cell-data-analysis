@@ -1,0 +1,56 @@
+# -*- coding: utf-8 -*-
+"""
+配置模块 - 集中管理应用配置、常量和枚举
+"""
+
+from .constants import (
+    DataColumn,
+    PlotType,
+    LabelFormat,
+    ColorPalette,
+    FilterOperator,
+    DEFAULT_FILTERS,
+    SUMMARY_COLUMNS,
+    SUMMARY_INDEX,
+    YIELD_LOSS_COLUMNS,
+    YIELD_LOSS_INDEX,
+    PLOT_PARAMETERS,
+    AXIS_LABELS,
+    WINDOW_SIZE,
+    FONT_SIZE,
+    DOT_SIZE,
+    LINE_WIDTH,
+    DATASET_NAME_MAX_LENGTH,
+    FILTER_TABLE_ROWS,
+    FILTER_TABLE_COLS,
+    ROLLING_WINDOW_RATIO,
+    ROLLING_WINDOW_MIN,
+    CONVERSION_FACTORS,
+    ROUNDING_PRECISION,
+)
+
+__all__ = [
+    'DataColumn',
+    'PlotType',
+    'LabelFormat',
+    'ColorPalette',
+    'FilterOperator',
+    'DEFAULT_FILTERS',
+    'SUMMARY_COLUMNS',
+    'SUMMARY_INDEX',
+    'YIELD_LOSS_COLUMNS',
+    'YIELD_LOSS_INDEX',
+    'PLOT_PARAMETERS',
+    'AXIS_LABELS',
+    'WINDOW_SIZE',
+    'FONT_SIZE',
+    'DOT_SIZE',
+    'LINE_WIDTH',
+    'DATASET_NAME_MAX_LENGTH',
+    'FILTER_TABLE_ROWS',
+    'FILTER_TABLE_COLS',
+    'ROLLING_WINDOW_RATIO',
+    'ROLLING_WINDOW_MIN',
+    'CONVERSION_FACTORS',
+    'ROUNDING_PRECISION',
+]
